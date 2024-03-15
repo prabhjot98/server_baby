@@ -1,11 +1,13 @@
 import wisp.{type Request, type Response}
-import gleam/string_builder
 import gleam/result
 import gleam/string
+import gleam/io
+import gleam/int
 import gleam/json
-import gleam/http.{Post}
+import gleam/http.{Get, Post}
 import gleam/dynamic.{type Dynamic}
 import app/web
+import sqlight
 
 pub type Color {
   Red
@@ -14,6 +16,31 @@ pub type Color {
   Green
   Blue
   Purple
+}
+
+fn to_string(color: Color) -> String {
+  case color {
+    Red -> "red"
+    Orange -> "orange"
+    Yellow -> "yellow"
+    Green -> "green"
+    Blue -> "blue"
+    Purple -> "purple"
+  }
+}
+
+fn fruple_to_json(fruple: #(String, Int, Color)) {
+  json.object([
+    #("name", json.string(fruple.0)),
+    #("sweetness", json.int(fruple.1)),
+    #(
+      "color",
+      json.string(
+        fruple.2
+        |> to_string,
+      ),
+    ),
+  ])
 }
 
 pub type Fruit {
@@ -29,7 +56,7 @@ fn decode_color(str: Dynamic) -> Result(Color, dynamic.DecodeErrors) {
 
   case lowercase_dyn_str {
     "red" -> Ok(Red)
-    "0range" -> Ok(Orange)
+    "orange" -> Ok(Orange)
     "yellow" -> Ok(Yellow)
     "green" -> Ok(Green)
     "blue" -> Ok(Blue)
@@ -50,20 +77,52 @@ fn decode_fruit(data: Dynamic) -> Result(Fruit, dynamic.DecodeErrors) {
   decoder(data)
 }
 
-/// The HTTP request handler- your application!
-/// 
-pub fn handle_request(req: Request) -> Response {
-  // Apply the middleware stack for this request/response.
-  use _req <- web.middleware(req)
+pub fn handle_request(connection: sqlight.Connection, req: Request) -> Response {
+  use req <- web.middleware(req)
 
-  // Later we'll use templates, but for now a string will do.
-  let body = string_builder.from_string("<h1>Weelcoomee</h1>")
-
-  // Return a 200 OK response with the body and a HTML content type.
-  wisp.html_response(body, 200)
+  case wisp.path_segments(req) {
+    ["fruits"] -> handle_fruits(connection, req)
+    _ -> wisp.not_found()
+  }
 }
 
-pub fn handle_json(req: Request) -> Response {
+fn handle_fruits(connection: sqlight.Connection, req: Request) -> Response {
+  case req.method {
+    Post -> new_fruit(connection, req)
+    Get -> all_fruits(connection, req)
+    _ -> wisp.method_not_allowed(allowed: [Get, Post])
+  }
+}
+
+fn all_fruits(connection: sqlight.Connection, req: Request) -> Response {
+  // Apply the middleware stack for this request/response.
+  use _req <- web.middleware(req)
+  use <- wisp.require_method(req, Get)
+
+  // Later we'll use templates, but for now a string will do.
+  let result = {
+    let sql = "SELECT * FROM fruits"
+    use fruits <- result.try(sqlight.query(
+      sql,
+      on: connection,
+      with: [],
+      expecting: dynamic.tuple3(dynamic.string, dynamic.int, decode_color),
+    ))
+
+    let fruit_json = json.array(fruits, fruple_to_json)
+    Ok(json.to_string_builder(fruit_json))
+  }
+
+  case result {
+    Ok(alright) -> wisp.json_response(alright, 200)
+    Error(e) -> {
+      io.debug(e)
+      wisp.unprocessable_entity()
+    }
+  }
+}
+
+fn new_fruit(connection: sqlight.Connection, req: Request) -> Response {
   // Apply the middleware stack for this request/response.
   use _req <- web.middleware(req)
   use <- wisp.require_method(req, Post)
@@ -74,8 +133,14 @@ pub fn handle_json(req: Request) -> Response {
     use fruit <- result.try(decode_fruit(json))
 
     // we have a fruit here
-    let resp = json.object([#("name", json.string(fruit.name))])
+    // dunk it
+    let sql = "INSERT INTO fruits ( name, sweetness, color ) VALUES   
+        ( '" <> fruit.name <> "', '" <> fruit.sweetness
+      |> int.to_string <> "', '" <> fruit.color
+      |> to_string <> "' );"
+    let assert Ok(Nil) = sqlight.exec(sql, connection)
 
+    let resp = json.object([#("name", json.string(fruit.name))])
     Ok(json.to_string_builder(resp))
   }
 
